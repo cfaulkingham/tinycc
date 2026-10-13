@@ -1,0 +1,3 @@
+/tcc-mcp-server
+*.dSYM/
+__pycache__/
