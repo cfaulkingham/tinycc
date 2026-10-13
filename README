@@ -84,6 +84,36 @@ when doing 'make test'.
 Please read tcc-doc.html to have all the features of TCC.  Additional
 information for the Windows port is in tcc-win32.txt.
 
+5) LLM MCP Server & Fork Updates (over https://repo.or.cz/w/tinycc.git)
+
+See README.md and examples/llm-mcp/README.md for full details on the
+additions in this repository:
+
+- Build TCC and the self-hosted MCP stdio server:
+    ./configure && make
+    make -C examples/llm-mcp
+    make -C examples/llm-mcp test
+
+- Configure in OpenCode (~/.config/opencode/opencode.json):
+    {
+      "$schema": "https://opencode.ai/config.json",
+      "mcp": {
+        "tcc": {
+          "type": "local",
+          "command": ["/path/to/tinycc/examples/llm-mcp/tcc-mcp-server"],
+          "enabled": true
+        }
+      }
+    }
+
+- Includes ARM64 codegen optimizations (immediate cmp/cmn, shifted-add
+  constant multiplies, shift-0 destination register fix), ARM64 inline
+  assembler bit-ops (rbit, clz, cls, rev, rev16, rev32, rev64), hardware
+  AArch64 builtins in libtcc1.a (__builtin_clz*, __builtin_ctz*,
+  __builtin_clrsb*, __builtin_ffs*), branchless elf_hash in tccelf.c,
+  pointer-walked TOK_HASH_FUNC in tccpp.c, and span-batched JSON
+  serialization in examples/llm-mcp/server.c.
+
 License:
 -------
 

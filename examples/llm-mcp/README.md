@@ -52,6 +52,22 @@ As an MCP client configuration (stdio transport):
 }
 ```
 
+For OpenCode (`~/.config/opencode/opencode.json` or project `opencode.json`),
+add this entry under `mcp`, then restart OpenCode:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "tcc": {
+      "type": "local",
+      "command": ["/path/to/tinycc/examples/llm-mcp/tcc-mcp-server"],
+      "enabled": true
+    }
+  }
+}
+```
+
 For Muse Code specifically, add this entry under `mcpServers` in
 `${XDG_CONFIG_HOME:-$HOME/.config}/muse/settings.json`, then relaunch
 Muse Code (note: a sandboxed Muse session cannot write that file
@@ -128,16 +144,47 @@ helper that parses this binary format and call it on the header bytes",
   `session.c`, `eval.c` or `call.c` with line numbers local to the
   chunk the model wrote. Compiler errors are captured through
   `tcc_set_error_func`.
-- The JSON reader in `server.c` is deliberately minimal: it locates
-  object members by key and decodes the scalars MCP needs (including
-  `\uXXXX` escapes), which is all a stdio JSON-RPC server requires.
+- The JSON reader/writer in `server.c` is deliberately minimal: it
+  locates object members by key, decodes the scalars MCP needs
+  (including `\uXXXX` escapes), and batches contiguous unescaped string
+  spans when reading and writing JSON payloads.
 - Client quirks handled: the server auto-detects newline-delimited
   JSON versus LSP-style `Content-Length` framing per message and
   replies in kind, and it clears any `O_NONBLOCK` flag an async
   client runtime leaks into its stdin/stdout at spawn. Verified
-  with Muse (`mcpServers` in `settings.json`) and Grok
-  (`grok mcp add tcc -- /path/to/tcc-mcp-server`, then
-  `grok mcp doctor tcc`).
+  with OpenCode (`mcp` in `opencode.json`), Muse (`mcpServers` in
+  `settings.json`), and Grok (`grok mcp add tcc -- /path/to/tcc-mcp-server`,
+  then `grok mcp doctor tcc`).
+
+## Closed-Loop JIT Introspection & Optimization
+
+Because functions compiled in a session live directly in executable RAM
+(`TCC_OUTPUT_MEMORY`) and every invocation runs in a crash-isolated
+`fork()` child, an LLM can use `tcc-mcp-server` as a live
+machine-code and hardware oracle:
+
+1. **Self-disassembly in RAM:** Cast any compiled function pointer
+   (`(const uint32_t *)&fn`) to inspect the exact instruction stream,
+   stack spills, and code size TCC emitted without writing object files.
+2. **Crash-safe hardware & kernel fault probing:** Deliberately execute
+   privileged registers (`mrs` on EL1 -> `SIGILL`), W^X `MAP_JIT`
+   write-while-executable violations (`SIGBUS`), or NX page fetches
+   (`SIGBUS`) and receive structured JSON signal reports in ~15-40 ms.
+3. **Closed-loop compiler & C optimization:** Prototype C rewrites,
+   inline assembly, or `MAP_JIT` machine code, verify bitwise and CPU
+   flag (`NZCV`) equivalence across edge cases, and benchmark in-process
+   with `host_now_ms()`.
+
+### Optimizations driven by `llm-mcp`
+
+| Component | Change | Measured Result |
+|---|---|---|
+| `examples/llm-mcp/server.c` (`json_escape`, `json_decode_string`) | Batch contiguous unescaped spans via `str_addn` instead of per-byte `str_addc` | **4.30x faster** (`494 ms -> 115 ms` on 4 KB x 20k) |
+| `tccelf.c` (`elf_hash`) | Branchless single-dereference loop (`h ^= (h >> 24) & 0xf0; h &= 0x0fffffff`) | **2.01x faster** (`51 -> 41` insns, `196 ns -> 97.5 ns/call`) |
+| `arm64-asm.c` (`asm_bitop`) | Implement `rbit`, `clz`, `cls`, `rev`, `rev16`, `rev32`, `rev64` inline assembly opcodes | **6.21x faster** 32-bit bit reversal (`rbit` vs 5-stage SWAR) |
+| `lib/builtin.c` (`libtcc1.a`) | Use ARM64 `clz`, `rbit`+`clz`, and `cls` for `__builtin_clz*`, `__builtin_ctz*`, `__builtin_clrsb*`, and `__builtin_ffs*`; omit static De Bruijn tables on AArch64 | **2.29x faster** (`clz+ctz+clrsb`), **1.29x faster** (`ffs`), `3x` smaller code |
+| `arm64-gen.c` (`arm64_gen_opic`) | Emit immediate `cmp`/`cmn [wx]a, #imm12` for `TOK_EQ..TOK_UGT`; strength-reduce `* 0`, `* 1`, `* -1`, and `* ((2^k + 1) << s)` (`* 3, 5, 6, 9, 10, 12, 17, 33...`) to shifted `add`/`lsl`; fix missing destination register `\| x` on `val == 0` shifts | **28% fewer instructions** in decimal parsing loops (`43 -> 31` insns); fixes `<< 32` register clobber |
+| `tccpp.c` (`TOK_HASH_FUNC`, `tok_alloc`) | Express `h + (h << 5)` as `h * 33u` (paired with `arm64_gen_opic` shifted `add`) and pointer-walk `p < end` | **1.15x faster** identifier hashing, 3 fewer stack loads/char |
 
 ## Security
 
